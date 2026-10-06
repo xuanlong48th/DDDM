@@ -23,7 +23,7 @@ import streamlit as st
 
 from main import (
     fetch_ohlc,
-    get_hose_watchlist,
+    get_market_watchlist,
     screen_symbol,
     fmt_int,
     PRICE_MIN,
@@ -32,6 +32,7 @@ from main import (
     LOOKBACK,
     MAX_WORKERS,
     ICT,
+    ALL_EXCHANGES,
 )
 from portfolio import (
     load_portfolio,
@@ -51,9 +52,10 @@ st.set_page_config(
 )
 
 
-@st.cache_data(ttl=3600)  # luu cache danh sach HOSE 1 tieng cho web chay nhanh hon
-def cached_watchlist() -> list:
-    return get_hose_watchlist()
+@st.cache_data(ttl=3600)  # luu cache danh sach niem yet 1 tieng cho web chay nhanh hon
+def cached_watchlist(exchanges_tuple) -> list:
+    """Tra ve [(symbol, exchange)] theo cac san duoc chon."""
+    return get_market_watchlist(list(exchanges_tuple))
 
 
 @st.cache_data(ttl=300)  # gia thi truong refresh moi 5 phut
@@ -65,19 +67,21 @@ def current_price(symbol: str) -> tuple:
     return float(latest["close"]), sess
 
 
-def run_scan(progress_cb) -> tuple:
-    """Quet song song toan san HOSE, bao tien do ve UI qua progress_cb(done, total, symbol)."""
-    symbols = cached_watchlist()
-    total = len(symbols)
+def run_scan(progress_cb, exchanges) -> tuple:
+    """Quet song song cac san duoc chon, bao tien do ve UI qua progress_cb(done, total, symbol)."""
+    watchlist = cached_watchlist(tuple(exchanges))  # [(symbol, exchange)]
+    total = len(watchlist)
     results, errors = [], []
     done = 0
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        futures = {ex.submit(screen_symbol, s): s for s in symbols}
+        futures = {ex.submit(screen_symbol, sym): (sym, exch)
+                   for sym, exch in watchlist}
         for fut in as_completed(futures):  # chay tren main thread -> cap nhat UI an toan
-            sym = futures[fut]
+            sym, exch = futures[fut]
             try:
                 res = fut.result()
                 if res:
+                    res["Sàn"] = exch
                     results.append(res)
             except Exception as e:  # noqa: BLE001 - ma loi tu bo qua, quet tiep
                 errors.append((sym, str(e)[:60]))
@@ -100,9 +104,9 @@ tab_scan, tab_port = st.tabs(["🔍 Quét Breakout", "💼 Quản lý Danh mục
 # TAB 1: Quet Breakout
 # ----------------------------------------------------------------------------
 with tab_scan:
-    st.title("🚀 Hệ thống Săn Cổ Phiếu Breakout (HOSE)")
+    st.title("🚀 Hệ thống Săn Cổ Phiếu Breakout")
     st.markdown(
-        "Công cụ tự động quét dòng tiền lớn: "
+        "Công cụ tự động quét dòng tiền lớn trên **HOSE, HNX, UPCOM**: "
         "tìm cổ phiếu **vượt đỉnh 20 phiên** kèm **khối lượng đột biến**."
     )
 
@@ -123,39 +127,52 @@ with tab_scan:
     if "scan" not in st.session_state:
         st.session_state.scan = None
 
+    selected_exchanges = st.multiselect(
+        "📊 Chọn sàn giao dịch cần quét:",
+        options=list(ALL_EXCHANGES),
+        default=list(ALL_EXCHANGES),
+    )
+
     col1, col2 = st.columns([1, 4])
     with col1:
         scan_button = st.button(
-            "🔍 Chạy quét toàn sàn HOSE ngay", type="primary", use_container_width=True
+            "🔍 Chạy quét ngay", type="primary", use_container_width=True
         )
 
     if scan_button:
-        progress_bar = st.progress(0, text="Đang chuẩn bị...")
-        t0 = time.time()
+        if not selected_exchanges:
+            st.warning("Vui lòng chọn ít nhất một sàn để quét.")
+        else:
+            progress_bar = st.progress(0, text="Đang chuẩn bị...")
+            t0 = time.time()
 
-        def _cb(done, total, sym):
-            progress_bar.progress(done / total, text=f"Đang quét ({done}/{total}): {sym}...")
+            def _cb(done, total, sym):
+                progress_bar.progress(done / total, text=f"Đang quét ({done}/{total}): {sym}...")
 
-        with st.spinner("Hệ thống đang tải dữ liệu và phân tích toàn bộ sàn HOSE..."):
-            results, errors, total = run_scan(_cb)
+            san_lbl = ", ".join(selected_exchanges)
+            with st.spinner(f"Hệ thống đang tải dữ liệu và phân tích các sàn {san_lbl}..."):
+                results, errors, total = run_scan(_cb, selected_exchanges)
 
-        progress_bar.empty()
-        elapsed = time.time() - t0
-        sess_date = results[0]["Phien"] if results else datetime.now(ICT).date().isoformat()
-        st.session_state.scan = {
-            "results": results,
-            "errors": errors,
-            "total": total,
-            "elapsed": elapsed,
-            "sess_date": sess_date,
-            "run_at": datetime.now(ICT).strftime("%Y-%m-%d %H:%M:%S"),
-        }
+            progress_bar.empty()
+            elapsed = time.time() - t0
+            sess_date = results[0]["Phien"] if results else datetime.now(ICT).date().isoformat()
+            st.session_state.scan = {
+                "results": results,
+                "errors": errors,
+                "total": total,
+                "elapsed": elapsed,
+                "sess_date": sess_date,
+                "exchanges": list(selected_exchanges),
+                "run_at": datetime.now(ICT).strftime("%Y-%m-%d %H:%M:%S"),
+            }
 
     scan = st.session_state.scan
     if scan:
         results = scan["results"]
+        san_lbl = ", ".join(scan.get("exchanges", ["?"]))
         st.caption(
-            f"Lần quét: {scan['run_at']} (ICT) • Phiên dữ liệu: {scan['sess_date']} • "
+            f"Lần quét: {scan['run_at']} (ICT) • Sàn: {san_lbl} • "
+            f"Phiên dữ liệu: {scan['sess_date']} • "
             f"Đã quét {scan['total']} mã trong {scan['elapsed']:.0f}s • "
             f"{len(scan['errors'])} mã lỗi (tự động bỏ qua)"
         )
@@ -169,6 +186,7 @@ with tab_scan:
             )
             df_show = pd.DataFrame({
                 "Mã CP": df["Ma"],
+                "Sàn": df["Sàn"],
                 "Giá Breakout": df["Gia (VND)"].map(fmt_int),
                 "Vùng Mua T+1": df["Vùng mua T+1"],
                 "Cắt Lỗ (-7%)": df["Cắt lỗ"].map(fmt_int),
@@ -178,7 +196,7 @@ with tab_scan:
             st.dataframe(df_show, use_container_width=True, hide_index=True)
         else:
             st.warning(
-                "Hôm nay không có mã cổ phiếu nào trên sàn HOSE "
+                f"Hôm nay không có mã cổ phiếu nào trên các sàn {san_lbl} "
                 "thỏa mãn đủ tiêu chí kỹ thuật."
             )
 

@@ -12,6 +12,7 @@ BUOC 4: Bo loc co phieu Viet Nam - Quet TOAN SAN HOSE + Scheduler.
 - Moi ma duoc boc try-except rieng: ma loi tu dong bo qua, vong lap chay tiep.
 - Gui canh bao qua Telegram Bot sau moi lan quet.
 - Che do chay tu dong: lich T2-T6 luc 15:15 (gio dia phuong cua may).
+- Ho tro da san: HOSE, HNX, UPCOM (loc theo board VCI: HSX/HNX/UPCOM).
 
 Nguon du lieu: VCI API cong khai (https://trading.vietcap.com.vn)
   + Danh sach niem yet:  GET /api/price/symbols/getAll  (board='HSX' ~ san HOSE)
@@ -24,6 +25,7 @@ Chay:
   python main.py --schedule      # chay nen: lich T2-T6 15:15 + bot nghe lenh Telegram
   python main.py --schedule --now  # quet ngay 1 lan roi vao che do nen
   python main.py --listen        # chi chay bot Telegram (/scan), khong lap lich
+  python main.py --exchanges HOSE HNX   # chi quet cac san chi dinh
 
 Bot Telegram: nhan /scan de quet ngay (chi chap nhan tu dung chat_id da cau hinh).
 """
@@ -63,6 +65,15 @@ BUY_REF = 1.00
 BUY_MAX = 1.02
 GAP_WARN = 1.03
 
+# Anh xa ten san chuan -> ma board trong du lieu VCI
+# (VCI dung 'HSX' cho san HOSE; khong co truong 'exchange' nhu code mau cu)
+EXCHANGE_BOARDS = {
+    "HOSE": ("HSX",),
+    "HNX": ("HNX",),
+    "UPCOM": ("UPCOM",),
+}
+ALL_EXCHANGES = ["HOSE", "HNX", "UPCOM"]
+
 # Chi danh gia phien DA HOAN TAT. Neu chay trong gio giao dich (HOSE 9:00-15:00),
 # nen ngay moi nhat la phien dang dien ra (vol chua day du) -> tu dong bo qua
 # va dung phien hoan tat gan nhat de danh gia. Dat False de giu hanh vi cu
@@ -101,28 +112,37 @@ session.headers.update(HEADERS)
 # ----------------------------------------------------------------------------
 # Buoc 1: Lay danh sach toan san HOSE
 # ----------------------------------------------------------------------------
-def get_hose_watchlist() -> list:
-    """Tai danh sach niem yet va loc ra cac ma co phieu san HOSE (board='HSX')."""
-    print("Dang tai danh sach toan bo doanh nghiep niem yet tu thi truong...")
+def get_market_watchlist(exchanges=None) -> list:
+    """Tai danh sach niem yet va loc theo cac san chi dinh.
+
+    Tra ve [(symbol, exchange)] voi exchange la ten chuan ('HOSE'/'HNX'/'UPCOM').
+    Loai chung quyen (CW) va ETF, chi giu co phieu thuong (type='STOCK').
+    """
+    wanted = [str(e).upper() for e in (exchanges or ALL_EXCHANGES)]
+    wanted = [e for e in wanted if e in EXCHANGE_BOARDS] or ["HOSE"]
+    boards = {b for e in wanted for b in EXCHANGE_BOARDS[e]}
+    board_to_ex = {b: e for e in wanted for b in EXCHANGE_BOARDS[e]}
+
+    print(f"Dang tai danh sach niem yet ({', '.join(wanted)})...")
     try:
         r = session.get(URL_SYMBOLS, timeout=25)
         r.raise_for_status()
         data = r.json()
-        hose = [
-            x["symbol"] for x in data
-            if str(x.get("board", "")).upper() in ("HSX", "HOSE")
+        out = [
+            (x["symbol"], board_to_ex[str(x.get("board", "")).upper()])
+            for x in data
+            if str(x.get("board", "")).upper() in boards
             and str(x.get("type", "")).upper() == "STOCK"
         ]
-        # Loai bo trung lap, sap xep de ket qua on dinh
-        hose = sorted(set(hose))
-        if not hose:
+        out = sorted(set(out))  # loai trung lap, sap xep on dinh
+        if not out:
             raise ValueError("API tra ve danh sach rong")
-        print(f"Da lay thanh cong {len(hose)} ma co phieu tu san HOSE.")
-        return hose
+        print(f"Da lay thanh cong {len(out)} ma ({', '.join(wanted)}).")
+        return out
     except Exception as e:  # noqa: BLE001
-        print(f"Loi khi tai danh sach san HOSE: {e}")
-        print(f"Dung danh sach du phong {len(FALLBACK_SYMBOLS)} ma.")
-        return list(FALLBACK_SYMBOLS)
+        print(f"Loi khi tai danh sach: {e}")
+        print(f"Dung danh sach du phong {len(FALLBACK_SYMBOLS)} ma (HOSE).")
+        return [(s, "HOSE") for s in FALLBACK_SYMBOLS]
 
 
 # ----------------------------------------------------------------------------
@@ -307,20 +327,21 @@ def _tg_api(method: str, params: dict | None = None, timeout: int = 30):
         return None
 
 
-def build_telegram_message(results: list, sess_date: str) -> str:
+def build_telegram_message(results: list, sess_date: str, exchanges=None) -> str:
     """Dung noi dung tin nhan Markdown tu danh sach ma DAT."""
+    san_str = ", ".join(exchanges) if exchanges else "HOSE"
     if not results:
-        return (f"🤖 Quét HOSE (phiên {sess_date}): "
+        return (f"🤖 Quét ({san_str}) phiên {sess_date}: "
                 "hôm nay không có mã nào đạt chuẩn Breakout.")
     t2 = t2_date(sess_date)
-    lines = [f"🚨 *PHÁT HIỆN BREAKOUT (HOSE)* 🚨",
+    lines = [f"🚨 *PHÁT HIỆN BREAKOUT ({san_str})* 🚨",
              f"Phiên {sess_date} | {len(results)} mã đạt chuẩn | Hàng về T+2: {t2}", ""]
     for r in results:
         close_px = int(r["Gia (VND)"])
         buy_lo = fmt_int(int(round(close_px * BUY_REF)))
         buy_hi = fmt_int(int(round(close_px * BUY_MAX)))
         lines.append(
-            f"• *{r['Ma']}* — Giá breakout: `{fmt_int(close_px)}` | "
+            f"• *{r['Ma']}* ({r.get('Sàn', '?')}) — Giá breakout: `{fmt_int(close_px)}` | "
             f"Vol: `{fmt_int(r['Khoi luong'])}` (`{r['Vol/MA20']}x` MA20)"
         )
         lines.append(
@@ -340,10 +361,15 @@ def build_telegram_message(results: list, sess_date: str) -> str:
 # Chay quet toan san (1 job hoan chinh: quet + in bang + gui Telegram)
 # ----------------------------------------------------------------------------
 def _run_screener_job_inner(completed_only: bool = COMPLETED_SESSION_ONLY,
-                            notify_chat_id=None) -> int:
+                            notify_chat_id=None,
+                            exchanges=None) -> int:
+    exchanges = ([str(e).upper() for e in exchanges] if exchanges else list(ALL_EXCHANGES))
+    exchanges = [e for e in exchanges if e in EXCHANGE_BOARDS] or ["HOSE"]
+    san_str = ", ".join(exchanges)
+
     run_time = datetime.now(ICT).strftime("%Y-%m-%d %H:%M:%S")
     print("=" * 90)
-    print("BO LOC CO PHIEU VIET NAM - QUET TOAN SAN HOSE: BREAKOUT + DOT BIEN KHOI LUONG")
+    print(f"BO LOC CO PHIEU VIET NAM - QUET CAC SAN {san_str}: BREAKOUT + DOT BIEN KHOI LUONG")
     print(f"Thoi gian chay: {run_time} (ICT) | Nguon du lieu: VCI")
     print(f"Dieu kien: Close >= {fmt_int(PRICE_MIN)} | Vol >= {fmt_int(VOL_MIN)} | "
           f"Vol >= {VOL_SPIKE}x MA{LOOKBACK} | Close > dinh {LOOKBACK} phien")
@@ -351,19 +377,22 @@ def _run_screener_job_inner(completed_only: bool = COMPLETED_SESSION_ONLY,
         print("Che do: chi danh gia phien DA HOAN TAT (bo qua nen dang dien ra neu chay trong gio GD)")
     print("=" * 90)
 
-    symbols = get_hose_watchlist()
-    total = len(symbols)
-    print(f"Bat dau quet thuat toan cho toan bo {total} ma (toi da {MAX_WORKERS} luong song song)...")
+    watchlist = get_market_watchlist(exchanges)  # [(symbol, exchange)]
+    total = len(watchlist)
+    print(f"Bat dau quet thuat toan cho toan bo {total} ma ({san_str}, "
+          f"toi da {MAX_WORKERS} luong song song)...")
 
     results, errors = [], []
     done = 0
     lock = threading.Lock()
 
-    def work(sym: str):
+    def work(item: tuple):
+        sym, ex = item
         nonlocal done
         try:
             res = screen_symbol(sym, completed_only=completed_only)
             if res:
+                res["Sàn"] = ex
                 with lock:
                     results.append(res)
         except Exception as e:  # noqa: BLE001 - bo qua ma loi, chay tiep ma khac
@@ -372,29 +401,30 @@ def _run_screener_job_inner(completed_only: bool = COMPLETED_SESSION_ONLY,
         finally:
             with lock:
                 done += 1
-                if done % 40 == 0 or done == total:
+                if done % 100 == 0 or done == total:
                     print(f"  ... da quet {done}/{total} ma ({len(results)} DAT)", flush=True)
 
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as ex:
-        list(ex.map(work, symbols))
+        list(ex.map(work, watchlist))
 
     # ---- Bang ket qua cuoi cung ----
     print()
     print("=" * 90)
-    print("KET QUA QUET TOAN SAN HOSE - TIN HIEU BREAKOUT")
+    print(f"KET QUA QUET CAC SAN {san_str} - TIN HIEU BREAKOUT")
     print("=" * 90)
     if results:
         df = pd.DataFrame(results).sort_values("Vol/MA20", ascending=False).reset_index(drop=True)
-        # Format so cho de doc
+        # Format so cho de doc; dua cot San len dau cho de nhin
         df["Gia (VND)"] = df["Gia (VND)"].map(fmt_int)
         df["Khoi luong"] = df["Khoi luong"].map(fmt_int)
         df["KL TB 20P"] = df["KL TB 20P"].map(fmt_int)
-        print(df.to_string(index=False))
+        cols = ["Sàn"] + [c for c in df.columns if c != "Sàn"]
+        print(df[cols].to_string(index=False))
     else:
-        print("Hom nay khong co co phieu nao tren san HOSE thoa man du tieu chi ky thuat.")
+        print(f"Hom nay khong co co phieu nao tren cac san {san_str} thoa man du tieu chi ky thuat.")
 
     print("-" * 90)
-    print(f"Tong ket: da quet {total} ma | {len(results)} ma DAT | {len(errors)} ma loi (tu dong bo qua)")
+    print(f"Tong ket: da quet {total} ma ({san_str}) | {len(results)} ma DAT | {len(errors)} ma loi (tu dong bo qua)")
     if errors and len(errors) <= 10:
         for sym, msg in errors:
             print(f"  - {sym}: {msg}")
@@ -403,7 +433,7 @@ def _run_screener_job_inner(completed_only: bool = COMPLETED_SESSION_ONLY,
     print()
     print("Dang gui thong bao qua Telegram...")
     sess_date = results[0]["Phien"] if results else datetime.now(ICT).date().isoformat()
-    send_telegram_message(build_telegram_message(results, sess_date),
+    send_telegram_message(build_telegram_message(results, sess_date, exchanges),
                           chat_id=notify_chat_id)
     return 0
 
@@ -415,9 +445,11 @@ _SCAN_LOCK = threading.Lock()
 
 
 def run_screener_job(completed_only: bool = COMPLETED_SESSION_ONLY,
-                     notify_chat_id=None) -> int:
+                     notify_chat_id=None,
+                     exchanges=None) -> int:
     """Wrapper cong khai: chi cho 1 phien quet chay tai mot thoi diem.
 
+    exchanges: danh sach san can quet, vi du ['HOSE', 'HNX']. Mac dinh ca 3 san.
     Neu co phien quet khac dang chay (vi du lich 15:15 trung lenh /scan),
     bao ban va tra ve 1 thay vi chay chong cheo.
     """
@@ -427,7 +459,7 @@ def run_screener_job(completed_only: bool = COMPLETED_SESSION_ONLY,
         send_telegram_message(busy_msg, chat_id=notify_chat_id)
         return 1
     try:
-        return _run_screener_job_inner(completed_only, notify_chat_id)
+        return _run_screener_job_inner(completed_only, notify_chat_id, exchanges)
     finally:
         _SCAN_LOCK.release()
 
@@ -572,6 +604,11 @@ def main(argv=None) -> int:
         "--listen", action="store_true",
         help="Chi chay bot lang nghe lenh Telegram (/scan), khong lap lich 15:15.",
     )
+    parser.add_argument(
+        "--exchanges", nargs="+", default=list(ALL_EXCHANGES),
+        choices=list(ALL_EXCHANGES),
+        help="Cac san can quet (mac dinh: ca 3 san HOSE HNX UPCOM).",
+    )
     args = parser.parse_args(argv)
 
     completed_only = COMPLETED_SESSION_ONLY and not args.live
@@ -582,7 +619,7 @@ def main(argv=None) -> int:
     if args.listen:
         listen_telegram_commands()
         return 0
-    return run_screener_job(completed_only=completed_only)
+    return run_screener_job(completed_only=completed_only, exchanges=args.exchanges)
 
 
 if __name__ == "__main__":
