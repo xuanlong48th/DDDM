@@ -1,0 +1,16 @@
+# --- Thu vien xu ly du lieu ---
+pandas>=2.0.0
+requests>=2.28.0
+
+# --- Lap lich chay tu dong ---
+schedule>=1.2.0
+
+# --- Web Dashboard ---
+streamlit>=1.30.0
+
+# --- GHI CHU QUAN TRONG (2026-10-06) ---
+# vnstock>=0.2.8 hien KHONG cai dat duoc qua pip vi goi nay dang bi PyPI
+# dat trang thai "quarantined" (tam khoa). Khi PyPI mo khoa tro lai, ban co the
+# cai tu GitHub:  pip install git+https://github.com/thinh-vu/vnstock.git
+# Script main.py KHONG phu thuoc vnstock: no goi truc tiep VCI API
+# (https://trading.vietcap.com.vn) - chinh la nguon du lieu ma vnstock dang su dung.
